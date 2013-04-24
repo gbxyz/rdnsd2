@@ -1,22 +1,21 @@
 #!/usr/bin/perl
-# $Id: munin-rdnsd.pl,v 1.16 2013/04/17 20:12:39 gavin Exp $
+# Copyright 2013 CentralNic Ltd. This program is free software; you can
+# redistribute it and/or modify it under the same terms as Perl itself.
 use Net::DNS;
+use Config::Simple;
 use strict;
+
+# to use this plugin, symlink it to /etc/munin/plugins/rdnds_(rate|time)_domain_(udp|tcp)
+# you'll need to two multiple symlinks if you want to monitor rate and time, UDP
+# and TCP, or have multiple domains
 
 my (undef, $mode, $domain, $proto) = split(/_/, $0, 4);
 
-my $pidfile;
-my $statsfile;
+# this plugin assumes that you have a config file here:
+my $config = Config::Simple->new('/etc/rdnsd/rdnsd.conf');
 
-if ($proto eq 'tcp') {
-	$pidfile   = '/var/run/rdnsd_tcp.pid';
-	$statsfile = '/var/run/rdnsd_tcp.log';
-
-} else {
-	$pidfile   = '/var/run/rdnsd.pid';
-	$statsfile = '/var/run/rdnsd.log';
-
-}
+my $pidfile = $config->param('PidFile');
+my $statsfile = $config->param('StatsFile');
 
 my @servers;
 
