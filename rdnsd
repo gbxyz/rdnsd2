@@ -213,7 +213,7 @@ rdnsd - a remote DNS server monitoring tool
 rdnsd is a tool which can be used to monitor the availability and responsiveness
 remote DNS servers. Given a list of DNS servers, it will periodically query each
 server in turn and record whether a response was received, and how quickly. This
-information can then be obtained by sending a signal to the rndsd process - a
+information can then be obtained by sending a signal to the rdnsd process - a
 Munin plugin is provided as an example of how this can be achieved.
 
 =head1 USAGE
