@@ -1,0 +1,398 @@
+#!/usr/bin/perl
+# $Id: rdnsd,v 1.7 2013/03/25 16:10:08 gavin Exp $
+# Copyright 2013 CentralNic Ltd. This program is free software; you can
+# redistribute it and/or modify it under the same terms as Perl itself.
+use Config::Simple;
+use Getopt::Long;
+use Net::DNS;
+use POSIX qw(setsid strftime);
+use Time::HiRes qw(time sleep);
+use Pod::Usage;
+use strict;
+
+#
+# get config from command line:
+#
+my $opts = {};
+GetOptions(
+	$opts,
+	'config=s',
+	'debug',
+	'loop=s',
+	'pidfile=s',
+	'proto=s',
+	'question=s',
+	'timeout=s',
+	'recurse',
+	'servers=s',
+	'statsfile=s',
+	'domains=s',
+	'help',
+);
+
+pod2usage('-verbose' => 99, '-sections' => 'USAGE|OPTIONS') if ($opts->{'help'});
+
+#
+# get config from config file:
+#
+my $config = Config::Simple->new('syntax' => 'simple');
+$config->read($opts->{'config'}) if ($opts->{'config'});
+
+#
+# pick config settings - command line overrides config file overrides defaults:
+#
+my $debug	= $opts->{'debug'}	|| $config->param('Debug') eq 'true'	|| undef;
+my $loop	= $opts->{'loop'}	|| $config->param('Loop')		|| 3;
+my $pidfile	= $opts->{'pidfile'}	|| $config->param('PidFile')		|| '/var/run/rdnsd.pid';
+my $proto	= $opts->{'proto'}	|| $config->param('Protocol')		|| 'udp';
+my $question	= $opts->{'question'}	|| $config->param('Question')		|| '. A IN';
+my $timeout	= $opts->{'timeout'}	|| $config->param('Timeout')		|| 1;
+my $recurse	= $opts->{'recurse'}	|| $config->param('Recurse') eq 'true'	|| undef;
+my $statsfile	= $opts->{'statsfile'}	|| $config->param('StatsFile')		|| '/var/run/rdnsd.log';
+my $servers	= $opts->{'servers'}	|| $config->param('Servers')		|| undef;
+my $domains	= $opts->{'domains'}	|| $config->param('Domains')		|| undef;
+
+debug('starting');
+
+my @servers;
+if ($servers && $domains) {
+	die("Both Servers and Domains are present in config (or were provided as arguments): please choose one or the other");
+
+} elsif ($servers) {
+	@servers = split(/\s*,\s*/, $servers);
+
+} else {
+	my $resolver = Net::DNS::Resolver->new;
+	my @domains = split(/\s*,\s*/, $domains);
+	foreach my $domain (@domains) {
+		my $answer = $resolver->query('_dns._udp.'.$domain, 'SRV');
+		if ($answer) {
+			foreach my $rr (grep { 'SRV' eq $_->type } $answer->answer) {
+				push(@servers, $rr->target);
+			}
+		}
+	}
+}
+
+die("no servers found") if (scalar(@servers) < 1);
+
+map { debug('will monitor %s', $_) } @servers;
+
+#
+# we put statistics data in here
+#
+my $stats = {};
+
+#
+# precompile this so it can be reused
+#
+my @question = split(/\s+/, $question);
+my $question = Net::DNS::Packet->new(@question);
+$question->header->rd($recurse ? 1 : 0);
+
+#
+# configure resolver
+#
+my $resolver = Net::DNS::Resolver->new;
+$resolver->udp_timeout($timeout);
+$resolver->tcp_timeout($timeout);
+$resolver->persistent_udp(0);
+$resolver->persistent_tcp(0);
+
+#
+# optionally daemonize:
+#
+unless ($debug) {
+	if (fork() > 0) {
+		exit 0;
+
+	} else {
+		setsid();
+		chdir('/');
+		$0 = '[rdnsd]';
+
+	}
+}
+
+#
+# write our PID to a file:
+#
+if (!open(PIDFILE, '>'.$pidfile)) {
+	die("Error opening '$pidfile': $!");
+
+} else {
+	print PIDFILE $$."\n";
+	close(PIDFILE);
+
+	debug('wrote %s', $pidfile);
+}
+
+#
+# configure signal handler to write stats to log file when we get the USR1
+# signal:
+#
+$SIG{USR1} = sub { eval {
+	if (!open(STATSFILE, '>'.$statsfile)) {
+		print STDERR "Error opening '$statsfile': $!\n" if ($debug);
+		exit 1;
+	}
+
+	foreach my $ns (sort(@servers)) {
+		next if ($stats->{$ns}->{'count'} < 1); # avoid divide by zero
+		printf(
+			STATSFILE
+			"%s %0.2f %d\n",
+			$ns,
+			($stats->{$ns}->{'success'} / $stats->{$ns}->{'count'}),
+			1000*($stats->{$ns}->{'time'} / $stats->{$ns}->{'count'})
+		);
+	}
+
+	print STDERR "Wrote stats to '$statsfile'\n" if ($debug);
+	close(STATSFILE);
+
+	$stats = {};
+}};
+
+# we check each server every $loop seconds so $interval is the sleep time
+# between each request:
+my $interval = ($loop/scalar(@servers));
+
+#
+# loop forever:
+#
+debug('entering main loop');
+while (1) {
+	debug('looping');
+
+	foreach my $ns (sort(@servers)) { eval {
+		debug('  %s', $ns);
+		$resolver->nameservers($ns);
+
+		my $t0 = time();
+		my $result;
+		if ($proto eq 'tcp') {
+			$result = $resolver->send_tcp($question, $question->data);
+
+		} else {
+			$result = $resolver->send_udp($question, $question->data);
+
+		}
+		my $dt = (time() - $t0);
+
+		#
+		# record stats
+		#
+		$stats->{$ns}->{'count'}++;
+		$stats->{$ns}->{'time'} += $dt;
+		$stats->{$ns}->{'success'}++ if ($result);
+
+		#
+		# sleep for a while
+		#
+		sleep($interval-$dt) unless ($interval-$dt <= 0);
+	} }
+}
+
+sub debug {
+	return unless $debug;
+	my ($fmt, @args) = @_;
+	my $message = sprintf($fmt, @args);
+	printf(STDERR "%s (rdnsd) %s\n", scalar(localtime()), $message);
+}
+
+__END__
+
+=pod
+
+=head1 NAME
+
+rdnsd - a remote DNS server monitoring tool
+
+=head1 DESCRIPTION
+
+rdnsd is a tool which can be used to monitor the availability and responsiveness
+remote DNS servers. Given a list of DNS servers, it will periodically query each
+server in turn and record whether a response was received, and how quickly. This
+information can then be obtained by sending a signal to the rndsd process - a
+Munin plugin is provided as an example of how this can be achieved.
+
+=head1 USAGE
+
+	rdnsd [OPTIONS]
+
+=head1 OPTIONS
+
+=over
+
+=item --help
+
+Display help text.
+
+=item --config=FILE
+
+Specify the configuration file. See L<CONFIGURATION FILE> for further details.
+Arguments passed on the command line will override the contents of this file.
+
+=item --debug
+
+Enable debug mode.
+
+=item --loop=LOOP
+
+Set loop duration.
+
+=item --pidfile=FILE
+
+Specify pid file.
+
+=item --proto=QUESTION
+
+Specify protocol.
+
+=item --question=QUESTION
+
+Specify question.
+
+=item --timeout=TIMEOUT
+
+Specify timeout.
+
+=item --recurse
+
+Enable recursion.
+
+=item --servers=SERVERS
+
+Specify servers to check.
+
+=item --statsfile=FILE
+
+Specify stats file.
+
+=item --domains=DOMAINS
+
+Specify domain names to query for a list of servers.
+
+=back
+
+=head1 CONFIGURATION FILE
+
+The easiest way to configure rdnsd is to provide a configuration file. The
+format is very simple. Here is an example:
+
+	Debug		false
+	PidFile		/var/run/rdnsd.pid
+	StatsFile	/var/run/rdnsd.log
+	Protocol	udp
+	Loop		3
+	Recurse		false
+	Question	. A IN
+	Servers		ns1.example.com,ns2.example.net
+	Domains		example.com
+
+The directives are explained below. As noted above, if the equivalent command
+line argument is passed, it will override the value in the configuration file.
+
+=over
+
+=item Debug (true|false)
+
+Default: false
+
+Normally, rdnsd will daemonise once started. If the C<Debug> parameter is
+C<true>, rdnsd will stay in the foreground and spam your terminal with debugging
+information.
+
+=item PidFile /path/to/pid/file
+
+Default: var/run/rdnsd.pid
+
+The file where rdnsd will write its pid.
+
+=item StatsFile /path/to/stats/file
+
+Default: /var/run/rdnsd.log
+
+The file where rdnsd will write statistics to when signalled. See L<OBTAINING
+STATISTICS> for further information.
+
+=item Protocol (udp|tcp)
+
+Default: udp
+
+Specify the transport protocol to use.
+
+=item Loop SECONDS
+
+Default: 2
+
+This specifies the length of the main loop. If this is set to 2, then each server
+will be checked every 2 seconds.
+
+=item Recurse (true|false)
+
+Default: false
+
+Enable recursion.
+
+=item Question QUESTION
+
+Default: example.com. IN A
+
+Specify the DNS question. The format is "QNAME QCLASS QTYPE".
+
+=item Servers SERVERS
+
+Default: none
+
+Specify the servers to be checked. This directive can't be used at the same time
+as the "Domains" directive.
+
+=item Domains DOMAINS
+
+Example: none
+
+Rather than specifying a list of nameservers, you can provide a list of domains
+instead. For each domain, rdnsd will query for SRV records for _dns._udp under
+the domain and use the target of any SRV records returned.
+
+=back
+
+=head1 OBTAINING STATISTICS
+
+To get statistics out of rdnsd, send it the USR1 signal:
+
+	$ kill -USR1 `cat /path/to/pid/file`
+
+This will cause rdnsd to dump its current data to the statistics file. If this
+file cannot be written to, rdnsd will terminate.
+
+=head2 STATISTICS FILE FORMAT
+
+The statistics file will contain one line for each server that is being checked.
+Each line contains the nameserver checked, the response rate as a decimal
+fraction, and the average response time in milliseconds, for example:
+
+	ns0.example.com 1.00 25
+
+Once the file has been written, rdnsd's internal data is reset, so subsequent
+signals will produce fresh statistical data.
+
+=head1 SEE ALSO
+
+=over
+
+=item L<https://www.centralnic.com/>
+
+=item L<http://www.net-dns.org/>
+
+=back
+
+=head1 COPYRIGHT
+
+rdnsd is Copyright 2013 CentralNic Ltd. All rights reserved. This program is
+free software; you can redistribute it and/or modify it under the same terms as
+Perl itself.
+
+=cut
