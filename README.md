@@ -137,11 +137,11 @@ line argument is passed, it will override the value in the configuration file.
 
 - Domains DOMAINS
 
-    Example: none
+    Default: none
 
     Rather than specifying a list of nameservers, you can provide a list of domains
     instead. For each domain, rdnsd will query for SRV records for \_dns.\_udp under
-    the domain and use the target of any SRV records returned.
+    the domain and use the targets of any SRV records returned.
 
 # OBTAINING STATISTICS
 
