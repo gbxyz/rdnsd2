@@ -5,43 +5,63 @@ use Net::DNS;
 use Config::Simple;
 use strict;
 
-# to use this plugin, symlink it to /etc/munin/plugins/rdnds_(rate|time)_domain_(udp|tcp)
-# you'll need to two multiple symlinks if you want to monitor rate and time, UDP
-# and TCP, or have multiple domains
+# to use this plugin, symlink it to /etc/munin/plugins/rdnds_(rate|time)_(udp|tcp)
+# you'll need to multiple symlinks if you want to monitor rate and time or UDP
+# and TCP
 
-my (undef, $mode, $domain, $proto) = split(/_/, $0, 4);
+my (undef, $mode, $proto) = split(/_/, $0, 4);
 
 # this plugin assumes that you have a config file here:
-my $config = Config::Simple->new('/etc/rdnsd/rdnsd.conf');
+my @files = (
+	"/etc/rdnsd/rdnsd_$proto.conf",
+	"/etc/rdnsd/rdnsd.conf",
+);
+my $config;
+foreach my $file (@files) {
+	if (-e $file) {
+		$config = Config::Simple->new($file);
+		last;
+	}
+}
+
+die("unhandled mode '$mode'") if ($mode ne 'rate' && $mode ne 'time');
 
 my $pidfile = $config->param('PidFile');
 my $statsfile = $config->param('StatsFile');
 
+my $servers	= $config->param('Servers');
+my $domains	= $config->param('Domains');
+
 my @servers;
+if ($servers && $domains) {
+	die("Both Servers and Domains are present in config (or were provided as arguments): please choose one or the other");
 
-my $resolver = Net::DNS::Resolver->new;
-
-my $answer = $resolver->query('_dns._udp.'.$domain, 'SRV');
-if (!$answer) {
-	die("No answer for '$domain'");
+} elsif ($servers) {
+	@servers = split(/\s*,\s*/, $servers);
 
 } else {
-	foreach my $rr (grep {$_->type eq 'SRV'} $answer->answer) {
-		push(@servers, $rr->target);
+	my $resolver = Net::DNS::Resolver->new;
+	my @domains = ('ARRAY' eq ref($domains) ? @{$domains} : split(/\s*,\s*/, $domains));
+	foreach my $domain (@domains) {
+		my $answer = $resolver->query('_dns._udp.'.$domain, 'SRV');
+		if ($answer) {
+			foreach my $rr (grep { 'SRV' eq $_->type } $answer->answer) {
+				push(@servers, $rr->target);
+			}
+		}
 	}
-
 }
 
-die("unhandled mode '$mode'") if ($mode ne 'rate' && $mode ne 'time');
+die("no servers found") if (scalar(@servers) < 1);
 
 if ($ARGV[0] eq 'config') {
 	print "graph_category DNS\n";
 
 	if ($mode eq 'time') {
-		printf("graph_title %s query response time %s\ngraph_vlabel Milliseconds\n", uc($domain), ($proto eq 'tcp' ? '(TCP)' : ''));
+		printf("graph_title Query Response Time %s\ngraph_vlabel Milliseconds\n", uc($proto));
 
 	} elsif ($mode eq 'rate') {
-		printf("graph_title %s query response rate %s\ngraph_vlabel Response rate\ngraph_args --upper-limit 1 -l 0\n", uc($domain), ($proto eq 'tcp' ? '(TCP)' : ''));
+		printf("graph_title Query Response Rate (%s)\ngraph_vlabel Response Rate\ngraph_args --upper-limit 1 -l 0\n", uc($proto));
 
 	}
 
