@@ -60,11 +60,11 @@ if ($servers && $domains) {
 	die("Both Servers and Domains are present in config (or were provided as arguments): please choose one or the other");
 
 } elsif ($servers) {
-	@servers = split(/\s*,\s*/, $servers);
+	@servers = ('ARRAY' eq ref($servers) ? @{$servers} : split(/\s*,\s*/, $servers));
 
 } else {
 	my $resolver = Net::DNS::Resolver->new;
-	my @domains = split(/\s*,\s*/, $domains);
+	my @domains = ('ARRAY' eq ref($domains) ? @{$domains} : split(/\s*,\s*/, $domains));
 	foreach my $domain (@domains) {
 		my $answer = $resolver->query('_dns._udp.'.$domain, 'SRV');
 		if ($answer) {
